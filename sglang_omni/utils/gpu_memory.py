@@ -188,16 +188,40 @@ def get_gpu_device_info(logical_gpu_id: int) -> GpuDeviceInfo:
         _shutdown_nvml(pynvml)
 
 
+def _accelerator_module_for_device_info(torch: Any) -> Any:
+    """The torch device module safe to read properties from in this process.
+
+    A properties read initializes a non-CUDA device, and the launcher must not
+    take a card, so those are read only once the caller has initialized them.
+    """
+    from sglang_omni.platforms import current_platform
+
+    device_type = current_platform.device_type
+    if device_type == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is unavailable")
+        return torch.cuda
+    module = getattr(torch, device_type, None)
+    if module is None or not module.is_available():
+        raise RuntimeError(f"{device_type} is unavailable")
+    if not module.is_initialized():
+        raise RuntimeError(
+            f"{device_type} is not initialized in this process; reading device "
+            "properties would initialize it"
+        )
+    return module
+
+
 def _get_torch_gpu_device_info(
     logical_gpu_id: int,
     device_id: int | str | None,
 ) -> GpuDeviceInfo:
-    """Return CUDA device metadata available through PyTorch."""
+    """Return accelerator device metadata available through PyTorch."""
     try:
         torch = importlib.import_module("torch")
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is unavailable")
-        properties = torch.cuda.get_device_properties(logical_gpu_id)
+        properties = _accelerator_module_for_device_info(torch).get_device_properties(
+            logical_gpu_id
+        )
         return GpuDeviceInfo(
             logical_gpu_id=logical_gpu_id,
             device_id=device_id,
@@ -253,19 +277,33 @@ def calculate_stage_load_delta_bytes(
     pre_model_load_memory_gib: float,
     post_model_load_memory_gib: float,
 ) -> int:
-    """Return GPU memory consumed between two free-memory samples."""
+    """Return GPU memory consumed between two free-memory samples.
+
+    Negative when a neighbouring tenant exited mid-load: free memory belongs to
+    the card, not to this stage. That is a fact about the sample, not an error.
+    """
     if pre_model_load_memory_gib < 0:
         raise ValueError("pre_model_load_memory_gib must be non-negative")
     if post_model_load_memory_gib < 0:
         raise ValueError("post_model_load_memory_gib must be non-negative")
-    if post_model_load_memory_gib > pre_model_load_memory_gib:
-        raise RuntimeError(
-            "Stage load memory delta is negative: "
-            f"pre_load={pre_model_load_memory_gib:.2f}GiB, "
-            f"post_load={post_model_load_memory_gib:.2f}GiB"
-        )
 
     return int((pre_model_load_memory_gib - post_model_load_memory_gib) * (1024**3))
+
+
+def get_torch_reserved_bytes(logical_gpu_id: int) -> int:
+    """Bytes this process's torch allocator holds on a card; 0 when unknowable.
+
+    Counts only our own allocations, so no other tenant can move it. Undercounts
+    a stage's real footprint, so it is a floor rather than a measurement.
+    """
+    try:
+        import torch
+
+        module = _accelerator_module_for_device_info(torch)
+        return int(module.memory_reserved(logical_gpu_id))
+    except Exception as exc:
+        logger.debug(f"Torch reserved memory is unavailable: {exc}")
+        return 0
 
 
 def get_gpu_startup_lock_path(

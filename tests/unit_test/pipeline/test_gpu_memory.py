@@ -8,7 +8,17 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+import sglang_omni.platforms as omni_platforms
 import sglang_omni.utils.gpu_memory as gpu_memory
+
+
+def _pin_device_type(monkeypatch: pytest.MonkeyPatch, device_type: str) -> None:
+    """Decide the accelerator these tests describe, whatever the host has."""
+    monkeypatch.setattr(
+        omni_platforms,
+        "current_platform",
+        SimpleNamespace(device_type=device_type),
+    )
 
 
 class _FakeNVML(ModuleType):
@@ -260,6 +270,9 @@ def test_get_gpu_device_info_falls_back_to_torch_when_nvml_import_fails(
             return fake_torch
         raise AssertionError(name)
 
+    # Which torch device module holds the properties is a platform question, so
+    # the fake answers for one named platform rather than for the host's.
+    _pin_device_type(monkeypatch, "cuda")
     monkeypatch.setattr(gpu_memory.importlib, "import_module", _import_module)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
 
@@ -318,12 +331,40 @@ def test_calculate_stage_load_delta_bytes_uses_free_memory_samples() -> None:
     ) == int(59.5 * 1024**3)
 
 
-def test_calculate_stage_load_delta_bytes_rejects_memory_growth() -> None:
-    with pytest.raises(RuntimeError, match="delta is negative"):
-        gpu_memory.calculate_stage_load_delta_bytes(
-            pre_model_load_memory_gib=35.0,
-            post_model_load_memory_gib=36.0,
-        )
+def test_calculate_stage_load_delta_bytes_reports_memory_growth_as_negative() -> None:
+    """A neighbouring process exiting mid-load leaves the card freer than it
+    started. Refusing to return that (it used to raise) costs the caller the one
+    signal it needs to charge the stage some other way."""
+    assert gpu_memory.calculate_stage_load_delta_bytes(
+        pre_model_load_memory_gib=35.0,
+        post_model_load_memory_gib=36.0,
+    ) == -int(1.0 * 1024**3)
+
+
+def test_get_torch_reserved_bytes_reads_the_accelerator_allocator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gpu_memory,
+        "_accelerator_module_for_device_info",
+        lambda torch: SimpleNamespace(memory_reserved=lambda gpu_id: 7 * 1024**3),
+    )
+
+    assert gpu_memory.get_torch_reserved_bytes(0) == 7 * 1024**3
+
+
+def test_get_torch_reserved_bytes_is_zero_when_the_device_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uninitialized accelerators raise here, and an unmeasurable allocator is a
+    floor of zero, not a failed startup."""
+
+    def _unavailable(torch):
+        raise RuntimeError("xpu is not initialized in this process")
+
+    monkeypatch.setattr(gpu_memory, "_accelerator_module_for_device_info", _unavailable)
+
+    assert gpu_memory.get_torch_reserved_bytes(0) == 0
 
 
 def test_gpu_startup_lock_path_uses_visible_device_mapping(
