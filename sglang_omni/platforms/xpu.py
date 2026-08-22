@@ -32,6 +32,7 @@ class XPUOmniPlatform(OmniPlatform):
         torch.xpu.set_device(0 if index is None else index)
 
     def enable_code2wav_graph(self):
+        """Not until a capture is seen live; a failed one rolls back to eager."""
         return False
 
     def get_fused_qk_norm_rope_with_cos_sin_cache(self):
@@ -46,8 +47,15 @@ class XPUOmniPlatform(OmniPlatform):
         return fused_inplace_qknorm_rope
 
     def enable_talker_graph(self):
-        """No: the talker samples inside the captured region and that path syncs."""
+        """Not until a capture is seen live; a failed one kills the pipeline."""
         return False
+
+    def sdpa_capture_context(self):
+        """Pin flash: the default XPU SDPA dispatch cannot be captured, and
+        flash tracks it closest (2.4e-4, fp16) of the ones that can."""
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+
+        return sdpa_kernel(SDPBackend.FLASH_ATTENTION)
 
     def get_decode_cuda_graph_backend(self) -> str | None:
         """SGLang leaves XPU decode capture opt-in and accepts only 'full'."""

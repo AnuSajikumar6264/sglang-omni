@@ -65,6 +65,12 @@ class OmniPlatform(DeviceMixin):
         """Check if current platform can capture the Qwen3-Omni talker's decode"""
         return True
 
+    def sdpa_capture_context(self):
+        """Context that keeps SDPA capturable; a no-op where it already is."""
+        import contextlib
+
+        return contextlib.nullcontext()
+
     def get_decode_cuda_graph_backend(self) -> str | None:
         """Decode-phase graph backend to request, or None for SGLang's own."""
         return None

@@ -4,6 +4,7 @@ SGLang-native Talker model for Qwen3-Omni compatiable with hf formatting.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Iterable, Optional, Tuple
 
@@ -53,6 +54,15 @@ def _bind_default_weight_loaders(module: nn.Module) -> None:
     for param in module.parameters():
         if not hasattr(param, "weight_loader"):
             param.weight_loader = default_weight_loader
+
+
+def _sdpa_capture_context():
+    """Platform SDPA context while a graph records, else a no-op."""
+    device_module = torch.get_device_module()
+    capturing = getattr(device_module, "is_current_stream_capturing", None)
+    if capturing is None or not capturing():
+        return contextlib.nullcontext()
+    return current_platform.sdpa_capture_context()
 
 
 class _PredictorDecodeGraph:
@@ -1718,13 +1728,14 @@ class Qwen3OmniTalker(nn.Module):
         cached_v = layer_v_cache[:, :, : cache_len + 1, :]
 
         # note (EdwardZhang1108): enable_gqa broadcasts KV heads in-kernel (#1145)
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            q,
-            cached_k,
-            cached_v,
-            is_causal=False,
-            enable_gqa=attn.num_heads != attn.num_kv_heads,
-        )
+        with _sdpa_capture_context():
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                q,
+                cached_k,
+                cached_v,
+                is_causal=False,
+                enable_gqa=attn.num_heads != attn.num_kv_heads,
+            )
         attn_output = attn_output.transpose(1, 2).reshape(
             batch_size, attn.num_heads * attn.head_dim
         )

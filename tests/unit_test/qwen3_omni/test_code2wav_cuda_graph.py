@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -181,8 +182,9 @@ class _FakeCudaBackend:
         del device
         self.synchronize_calls += 1
 
-    def is_cuda_tensor(self, tensor: torch.Tensor) -> bool:
-        return id(tensor) in self._tensor_devices
+    def is_accelerator_tensor(self, tensor: torch.Tensor, device: torch.device) -> bool:
+        marked = self._tensor_devices.get(id(tensor))
+        return marked is not None and marked.type == device.type
 
     def tensor_device_matches(self, tensor: torch.Tensor, device: torch.device) -> bool:
         return self._tensor_devices.get(id(tensor)) == device
@@ -380,22 +382,17 @@ def test_cuda_api_restores_original_stream_when_capture_exit_raises(
         assert kwargs["stream"] is side_stream
         return _FailingCaptureContext()
 
-    monkeypatch.setattr(
-        code2wav_cuda_graph.torch.cuda,
-        "current_stream",
-        lambda _device: current["stream"],
+    fake_module = SimpleNamespace(
+        current_stream=lambda _device: current["stream"],
+        set_stream=lambda stream: current.update(stream=stream),
+        CUDAGraph=lambda: object(),
+        graph=graph_context,
     )
     monkeypatch.setattr(
-        code2wav_cuda_graph.torch.cuda,
-        "set_stream",
-        lambda stream: current.update(stream=stream),
+        code2wav_cuda_graph.torch,
+        "get_device_module",
+        lambda *_args, **_kwargs: fake_module,
     )
-    monkeypatch.setattr(
-        code2wav_cuda_graph.torch.cuda,
-        "CUDAGraph",
-        lambda: object(),
-    )
-    monkeypatch.setattr(code2wav_cuda_graph.torch.cuda, "graph", graph_context)
 
     with pytest.raises(RuntimeError, match="fake capture_end failed"):
         code2wav_cuda_graph._TorchCudaApi().capture(
@@ -621,7 +618,7 @@ def test_intentional_eager_fallbacks(
 @pytest.mark.parametrize(
     ("case", "expected_error", "message"),
     [
-        ("non_cuda", TypeError, "CUDA tensor"),
+        ("non_cuda", TypeError, "must be on a cuda device"),
         ("wrong_dtype", TypeError, "torch.long"),
         ("wrong_device", ValueError, "cuda:0"),
         ("wrong_shape", ValueError, "shape"),

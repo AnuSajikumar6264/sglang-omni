@@ -170,3 +170,15 @@ def test_xpu_names_the_decode_graph_backend_sglang_leaves_off() -> None:
 def test_xpu_keeps_the_qwen3_omni_talker_decode_eager() -> None:
     assert xpu_platform.XPUOmniPlatform().enable_talker_graph() is False
     assert OmniPlatform().enable_talker_graph() is True
+
+
+def test_xpu_pins_a_capturable_sdpa_backend() -> None:
+    import contextlib
+
+    with xpu_platform.XPUOmniPlatform().sdpa_capture_context():
+        pass
+
+    for platform in (OmniPlatform(), CPUOmniPlatform()):
+        assert isinstance(
+            platform.sdpa_capture_context(), contextlib.nullcontext
+        ), type(platform).__name__

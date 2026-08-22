@@ -148,10 +148,6 @@ def test_qwen_code2wav_factory_default_does_not_build_cuda_graphs(monkeypatch) -
 
 
 def test_non_cuda_platforms_disable_the_code2wav_graph() -> None:
-    """The runner is CUDA-only, and the platform owns that decision rather than the
-    factory re-deriving it from the device type. A platform inheriting the base True
-    would reach the CUDA-only runner, so every non-CUDA platform declares itself.
-    """
     from sglang_omni.platforms.cpu import CPUOmniPlatform
     from sglang_omni.platforms.cuda import CUDAOmniPlatform
     from sglang_omni.platforms.npu import NPUOmniPlatform
