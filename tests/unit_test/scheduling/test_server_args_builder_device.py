@@ -116,3 +116,44 @@ def test_placement_supplies_the_device_when_no_override_is_given(monkeypatch) ->
     resolved = platforms.current_platform.device_type
 
     assert _drive_build(monkeypatch, overrides=None) == resolved
+
+
+def test_the_platform_decode_graph_backend_reaches_server_args(monkeypatch) -> None:
+    monkeypatch.setattr(
+        platforms.current_platform,
+        "get_decode_cuda_graph_backend",
+        lambda: "full",
+        raising=False,
+    )
+
+    assert _build(monkeypatch)["cuda_graph_backend_decode"] == "full"
+
+
+def test_a_platform_with_no_preference_leaves_the_decode_backend_alone(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        platforms.current_platform,
+        "get_decode_cuda_graph_backend",
+        lambda: None,
+        raising=False,
+    )
+
+    assert "cuda_graph_backend_decode" not in _build(monkeypatch)
+
+
+def test_an_engine_that_asked_for_eager_decode_keeps_it(monkeypatch) -> None:
+    monkeypatch.setattr(
+        platforms.current_platform,
+        "get_decode_cuda_graph_backend",
+        lambda: "full",
+        raising=False,
+    )
+
+    for opt_out in ("disable_cuda_graph", "disable_decode_cuda_graph"):
+        kwargs = _build(monkeypatch, **{opt_out: True})
+        assert "cuda_graph_backend_decode" not in kwargs, opt_out
+
+    # An engine naming its own backend keeps that too.
+    pinned = _build(monkeypatch, cuda_graph_backend_decode="disabled")
+    assert pinned["cuda_graph_backend_decode"] == "disabled"

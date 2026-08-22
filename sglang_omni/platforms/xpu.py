@@ -45,6 +45,16 @@ class XPUOmniPlatform(OmniPlatform):
             return None
         return fused_inplace_qknorm_rope
 
+    def enable_talker_graph(self):
+        """No: the talker samples inside the captured region and that path syncs."""
+        return False
+
+    def get_decode_cuda_graph_backend(self) -> str | None:
+        """SGLang leaves XPU decode capture opt-in and accepts only 'full'."""
+        from sglang.srt.model_executor.cuda_graph_config import Backend
+
+        return Backend.FULL
+
     def apply_model_worker_backend_policy(
         self,
         server_args: ServerArgs,

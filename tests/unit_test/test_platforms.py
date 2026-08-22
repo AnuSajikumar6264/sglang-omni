@@ -154,3 +154,19 @@ def test_xpu_probe_surfaces_a_driver_initialization_failure(monkeypatch) -> None
 
     with pytest.raises(RuntimeError, match="Level Zero init failed"):
         platforms._is_xpu_available()
+
+
+def test_xpu_names_the_decode_graph_backend_sglang_leaves_off() -> None:
+    from sglang.srt.model_executor.cuda_graph_config import Backend
+
+    assert xpu_platform.XPUOmniPlatform().get_decode_cuda_graph_backend() == (
+        Backend.FULL
+    )
+    # Other platforms keep SGLang's own device default.
+    assert OmniPlatform().get_decode_cuda_graph_backend() is None
+    assert CPUOmniPlatform().get_decode_cuda_graph_backend() is None
+
+
+def test_xpu_keeps_the_qwen3_omni_talker_decode_eager() -> None:
+    assert xpu_platform.XPUOmniPlatform().enable_talker_graph() is False
+    assert OmniPlatform().enable_talker_graph() is True

@@ -28,6 +28,7 @@ from sglang_omni.models.qwen3_omni.request_builders import (
     apply_encoder_result,
     build_encoder_request,
 )
+from sglang_omni.platforms import current_platform
 from sglang_omni.profiler.event_recorder import emit as _emit_event
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.generation_batch_policy import (
@@ -1150,7 +1151,7 @@ def create_talker_ar_executor_from_config(
     overrides = build_generation_batch_overrides(
         max_running_requests=32,
         server_args_overrides=server_args_overrides,
-        disable_cuda_graph=False,
+        disable_cuda_graph=not current_platform.enable_talker_graph(),
         sampling_backend="pytorch",
     )
     overrides["tp_size"] = tp_size

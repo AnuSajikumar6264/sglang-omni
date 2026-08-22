@@ -10,6 +10,7 @@ from sglang.srt.mem_cache.kv_cache_configurator import KVCacheConfigurator
 import sglang_omni.model_runner.sglang_model_runner as runner_mod
 import sglang_omni.models.qwen3_omni.bootstrap as qwen_bootstrap
 import sglang_omni.models.qwen3_omni.stages as qwen_stages
+from sglang_omni.platforms import current_platform
 from tests.unit_test.fakes import FakeServerArgs
 
 
@@ -396,7 +397,7 @@ def test_qwen_talker_ar_threads_explicit_generation_batch_policy(monkeypatch) ->
         {
             "cuda_graph_bs": [1, 2, 4, 8, 12, 16, 24, 32],
             "cuda_graph_max_bs": 32,
-            "disable_cuda_graph": False,
+            "disable_cuda_graph": not current_platform.enable_talker_graph(),
             "max_running_requests": 32,
             "sampling_backend": "pytorch",
             "torch_compile_max_bs": 32,

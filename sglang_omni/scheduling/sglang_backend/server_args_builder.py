@@ -35,6 +35,22 @@ def _normalize_decode_cuda_graph_overrides(kwargs: dict[str, Any]) -> None:
         kwargs[decode_name] = legacy_value
 
 
+def _apply_platform_decode_cuda_graph_backend(kwargs: dict[str, Any]) -> None:
+    """Name the platform's decode backend, unless this engine opted out.
+
+    SGLang applies it after the disable switches, so it would otherwise outrank
+    an engine that asked for eager decode.
+    """
+    from sglang_omni.platforms import current_platform
+
+    backend = current_platform.get_decode_cuda_graph_backend()
+    if backend is None:
+        return
+    if kwargs.get("disable_cuda_graph") or kwargs.get("disable_decode_cuda_graph"):
+        return
+    kwargs.setdefault("cuda_graph_backend_decode", backend)
+
+
 def build_sglang_server_args(
     model_path: str,
     context_length: int,
@@ -65,6 +81,7 @@ def build_sglang_server_args(
     # adapted SGLang's phase-specific prefill contract opt in explicitly
     # through their generation defaults / server overrides.
     kwargs.setdefault("cuda_graph_backend_prefill", CudaGraphBackend.DISABLED)
+    _apply_platform_decode_cuda_graph_backend(kwargs)
     if kwargs.get("mem_fraction_static") is None:
         kwargs.pop("mem_fraction_static", None)
     kwargs.setdefault("device", _platform_device_type())

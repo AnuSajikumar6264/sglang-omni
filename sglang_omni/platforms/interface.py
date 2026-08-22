@@ -60,3 +60,11 @@ class OmniPlatform(DeviceMixin):
     def enable_code2wav_graph(self):
         """Check if current platform support Graph for code2wav in Qwen3-Omni"""
         return True
+
+    def enable_talker_graph(self):
+        """Check if current platform can capture the Qwen3-Omni talker's decode"""
+        return True
+
+    def get_decode_cuda_graph_backend(self) -> str | None:
+        """Decode-phase graph backend to request, or None for SGLang's own."""
+        return None
