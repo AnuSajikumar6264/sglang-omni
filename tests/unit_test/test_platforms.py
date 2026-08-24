@@ -182,3 +182,10 @@ def test_xpu_pins_a_capturable_sdpa_backend() -> None:
         assert isinstance(
             platform.sdpa_capture_context(), contextlib.nullcontext
         ), type(platform).__name__
+
+
+def test_xpu_and_cpu_decline_the_codec_decode_graph() -> None:
+    assert xpu_platform.XPUOmniPlatform().enable_codec_decode_graph() is False
+    assert CPUOmniPlatform().enable_codec_decode_graph() is False
+    assert OmniPlatform().enable_codec_decode_graph() is True
+    assert CUDAOmniPlatform().enable_codec_decode_graph() is True
