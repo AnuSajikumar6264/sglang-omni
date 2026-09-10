@@ -11,30 +11,43 @@ observed directly.
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sglang.srt.model_executor.cuda_graph_config import Backend
 
 import sglang_omni.platforms as platforms
 from sglang_omni.models.llada2_uni import stages
 from sglang_omni.models.llada2_uni.config import IMAGE_STAGE, THINKER_STAGE, EntryClass
+from tests.unit_test.fixtures.mini_checkpoint import write_mini_llama_checkpoint
 
 
 class _FakePlatform:
     """A platform stand-in carrying only the hooks these stages consult."""
 
-    device_type = "xpu"
-
-    def __init__(self, *, dllm_backend: str | None, dllm_graph: bool) -> None:
+    def __init__(
+        self,
+        *,
+        dllm_backend: str | None,
+        dllm_graph: bool,
+        device_type: str = "xpu",
+        decode_graph_backend: str | None = None,
+    ) -> None:
+        self.device_type = device_type
         self._dllm_backend = dllm_backend
         self._dllm_graph = dllm_graph
+        self._decode_graph_backend = decode_graph_backend
 
     def get_dllm_attention_backend(self) -> str | None:
         return self._dllm_backend
 
     def enable_dllm_decode_graph(self) -> bool:
         return self._dllm_graph
+
+    def get_decode_cuda_graph_backend(self) -> str | None:
+        return self._decode_graph_backend
 
 
 def _drive_thinker(
@@ -52,15 +65,24 @@ def _drive_thinker(
     def fake_build(model_path, **kwargs):
         del model_path
         build_kwargs.update(kwargs)
-        # Mirrors a freshly built ServerArgs: cuda_graph_config is still the
-        # unresolved None here (see the regression test below), so a stand-in
-        # that fills it in would hide a crash on the real object.
+        # The real builder resolves before it returns, so the stand-in answers
+        # with a resolved cuda_graph_config -- and mirrors the precedence the
+        # stage depends on: a per-phase decode backend outranks the legacy
+        # disable switch. The end-to-end tests below pin that against SGLang.
+        decode = kwargs.get("cuda_graph_backend_decode")
+        if decode is None:
+            decode = (
+                Backend.DISABLED if kwargs.get("disable_cuda_graph") else Backend.FULL
+            )
         return SimpleNamespace(
             attention_backend=kwargs.get("attention_backend"),
             dllm_algorithm=kwargs.get("dllm_algorithm"),
             mem_fraction_static=None,
             disable_cuda_graph=bool(kwargs.get("disable_cuda_graph", False)),
-            cuda_graph_config=None,
+            cuda_graph_config=SimpleNamespace(
+                decode=SimpleNamespace(backend=decode),
+                prefill=SimpleNamespace(backend=Backend.DISABLED),
+            ),
         )
 
     def fake_scheduler(server_args, gpu_id, **kwargs):
@@ -75,6 +97,51 @@ def _drive_thinker(
 
     stages.create_sglang_dllm_thinker_executor_from_config("unused", **factory_kwargs)
     return build_kwargs, scheduler_kwargs
+
+
+def _write_mini_dllm_checkpoint(tmp_path: Path) -> str:
+    """A checkpoint the real resolution pipeline accepts as a diffusion LLM."""
+    return write_mini_llama_checkpoint(tmp_path, architectures=["LLaDA2MoeModelLM"])
+
+
+def _drive_real_thinker(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: _FakePlatform,
+    model_path: str,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """Build the thinker through SGLang's own resolution; fake only the engine.
+
+    The device is pinned to cuda the way upstream's resolution tests pin it, so
+    the record resolves the same on an accelerator-less host, and the platform
+    stand-in claims cuda for the same reason -- what is under test is a platform
+    that names a dLLM backend, not XPU's device support.
+
+    gpu_id is passed explicitly because placement always passes it for a GPU
+    stage: without an index resolve_concrete_device asks the host which card
+    this process is on, which raises on a host whose torch has no cuda.
+    """
+    from sglang_omni.models.llada2_uni import bootstrap
+
+    scheduler_kwargs: dict[str, Any] = {}
+
+    def fake_scheduler(server_args, gpu_id, **kwargs):
+        scheduler_kwargs.update(
+            {"server_args": server_args, "gpu_id": gpu_id, **kwargs}
+        )
+        return SimpleNamespace()
+
+    monkeypatch.setattr(platforms, "current_platform", platform)
+    monkeypatch.setattr(bootstrap, "create_dllm_thinker_scheduler", fake_scheduler)
+
+    stages.create_sglang_dllm_thinker_executor_from_config(
+        model_path,
+        device="cuda",
+        gpu_id=0,
+        max_seq_len=2048,
+        server_args_overrides=dict(overrides),
+    )
+    return scheduler_kwargs
 
 
 def test_no_stage_pins_a_device_in_the_pipeline_config() -> None:
@@ -239,31 +306,133 @@ def test_the_thinker_passes_its_tp_identity_through(
     assert scheduler["nccl_port"] == 29500
 
 
-def test_the_thinker_only_reads_server_args_that_are_resolved_by_then(
+def test_the_resolved_decode_backend_is_never_the_field_on_server_args(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``server_args.cuda_graph_config`` stays None through a whole build.
+
+    SGLang's resolver for it is declaration-only: it never writes the field, so
+    the graph switches are readable only through the accessor that overlays the
+    declarations. A field read answers None on a fully resolved record and kills
+    the stage at construction -- ``AttributeError: 'NoneType' object has no
+    attribute 'decode'`` -- before any weight is touched, on every platform.
+    """
+    from sglang_omni.scheduling.generation_batch_policy import (
+        get_decode_cuda_graph_backend,
+    )
+
+    scheduler = _drive_real_thinker(
+        monkeypatch,
+        _FakePlatform(dllm_backend="triton", dllm_graph=False, device_type="cuda"),
+        _write_mini_dllm_checkpoint(tmp_path),
+    )
+    server_args = scheduler["server_args"]
+
+    assert server_args._resolution_finished is True
+    assert server_args.cuda_graph_config is None
+    assert get_decode_cuda_graph_backend(server_args) == Backend.DISABLED
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"cuda_graph_backend_decode": "full"}, id="per-phase-backend"),
+        pytest.param(
+            {"cuda_graph_config": {"decode": {"backend": "full"}}}, id="nested-config"
+        ),
+    ],
+)
+def test_capture_turned_on_past_the_disable_switch_still_meets_the_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, overrides: dict[str, Any]
+) -> None:
+    """Both of SGLang's newer graph switches outrank ``disable_cuda_graph``.
+
+    The stage requests the disable switch to stay eager, but a per-phase backend
+    and an explicit cuda_graph_config are both resolved after it and win, so a
+    refusal that read the request would pass the run straight through to the
+    flashinfer rewrite it exists to prevent.
+    """
+    with pytest.raises(ValueError, match="flashinfer"):
+        _drive_real_thinker(
+            monkeypatch,
+            _FakePlatform(dllm_backend="triton", dllm_graph=False, device_type="cuda"),
+            _write_mini_dllm_checkpoint(tmp_path),
+            **overrides,
+        )
+
+
+def test_a_platform_that_defaults_decode_capture_on_meets_the_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A platform names its decode graph backend for every SGLang stage it hosts.
+
+    That default is applied to this stage too, so dropping the dLLM stage's own
+    disable switch would hand the run capture -- and the flashinfer rewrite --
+    from a hook that says nothing about diffusion LLMs.
+    """
+    platform = _FakePlatform(
+        dllm_backend="triton",
+        dllm_graph=True,
+        device_type="cuda",
+        decode_graph_backend=Backend.FULL,
+    )
+    with pytest.raises(ValueError, match="flashinfer"):
+        _drive_real_thinker(
+            monkeypatch, platform, _write_mini_dllm_checkpoint(tmp_path)
+        )
+
+
+def test_the_thinker_takes_the_memory_fraction_its_stage_was_placed_with(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The factory must survive an unresolved ``cuda_graph_config``.
+    """The placement fraction reaches a factory only if it declares the kwarg.
 
-    SGLang folds the graph flags into that field in its resolution pass, which
-    runs inside the engine bootstrap this factory calls last, so a freshly built
-    ServerArgs still carries the dataclass default -- and a ``resolved_view``
-    read taken before that pass answers with the same raw input, since a
-    declaration-only resolver never writes the field. Reading it beforehand
-    killed the stage at construction -- ``AttributeError: 'NoneType' object has
-    no attribute 'decode'`` -- before any weight was touched, on every platform,
-    and the stand-in used here is what let it through.
+    resolve_factory_signature_args injects it where the signature asks and drops
+    it in silence otherwise, so an undeclared thinker let SGLang size its KV pool
+    against the whole card -- while the image encoder held the rest of it.
     """
-    import dataclasses
+    from sglang_omni.config.runtime import resolve_stage_factory_args
 
-    from sglang.srt.server_args import ServerArgs
+    config = EntryClass(model_path="unused")
+    stage_cfg = config.stage_named(THINKER_STAGE)
+    stage_cfg.gpu_memory_fraction = 0.8
 
-    field = {f.name: f for f in dataclasses.fields(ServerArgs)}["cuda_graph_config"]
-    assert field.default is None, "stub below must mirror the unresolved default"
+    resolved = resolve_stage_factory_args(stage_cfg, config, gpu_id=0)
+    assert resolved["total_gpu_memory_fraction"] == 0.8
 
     _, scheduler = _drive_thinker(
-        monkeypatch, _FakePlatform(dllm_backend="triton", dllm_graph=False)
+        monkeypatch,
+        _FakePlatform(dllm_backend="triton", dllm_graph=False),
+        total_gpu_memory_fraction=0.8,
     )
-    assert scheduler["server_args"].cuda_graph_config is None
+    assert scheduler["total_gpu_memory_fraction"] == 0.8
+
+
+def test_the_thinker_refuses_a_tp_size_the_pipeline_did_not_place(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """tp_size is placement, not a request: the followers are already spawned.
+
+    An override that disagreed used to be dropped silently -- the factory seeded
+    tp_size first and let the operator's value overwrite it -- so SGLang built a
+    group of a different width than the stage had ranks for and the first MoE
+    collective hung.
+    """
+    with pytest.raises(ValueError, match="tp_size"):
+        _drive_thinker(
+            monkeypatch,
+            _FakePlatform(dllm_backend="triton", dllm_graph=False),
+            tp_size=2,
+            server_args_overrides={"tp_size": 4},
+        )
+
+    named, _ = _drive_thinker(
+        monkeypatch,
+        _FakePlatform(dllm_backend="triton", dllm_graph=False),
+        tp_size=2,
+        server_args_overrides={"tp_size": 2},
+    )
+    assert named["tp_size"] == 2
 
 
 def test_the_dllm_scheduler_declares_that_tp_needs_work_replication() -> None:
