@@ -81,7 +81,7 @@ class XPUOmniPlatform(OmniPlatform):
         # here. Measured on LLaDA2.0-Uni under TP=2, eight concurrent requests
         # per trial: 3 of 6 trials had at least one garbled reply (one trial 4 of
         # 8), and the dirty trials were also the slow ones (119s, 154s against
-        # 70s clean). Capping the round cleared 4 of 4 trials at 72-81s, so the
+        # 70s clean). Capping the round cleared 13 of 13 trials at 63-93s, so the
         # cap costs no measurable throughput at this concurrency.
         #
         # What is left after eliminating the obvious causes -- the paged radix

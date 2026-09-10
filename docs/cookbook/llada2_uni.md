@@ -61,7 +61,7 @@ Three things are decided by the platform rather than by this command line:
   least one reply in 3 of 6 trials, and the dirty trials were also the slow ones.
   Concurrent requests are still accepted and still pipelined against the image
   encoder — they queue for the thinker instead of sharing its forward, which
-  cleared 10 of 10 trials at no measurable cost in wall-clock at this
+  cleared 13 of 13 trials at no measurable cost in wall-clock at this
   concurrency.
 
 Measured on two Intel Arc Pro B60 cards: ~15-20 tok/s on a warm 64-token text
