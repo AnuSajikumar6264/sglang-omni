@@ -148,6 +148,17 @@ class OmniPlatform(DeviceMixin):
         """
         return None
 
+    def dllm_max_requests_per_round(self) -> int | None:
+        """How many requests a diffusion-LLM round may hold here, or None.
+
+        None keeps SGLang's batched denoising, where one forward advances every
+        block in the round. A platform that has measured that path returning
+        wrong tokens under concurrency caps the round instead: the number of
+        rounds a block needs then stops depending on which requests happen to
+        share it, which is what makes a round reproducible.
+        """
+        return None
+
     def get_decode_cuda_graph_backend(self) -> str | None:
         return None
 
