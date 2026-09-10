@@ -87,6 +87,9 @@ def create_sglang_dllm_thinker_executor_from_config(
     *,
     device: str | None = None,
     gpu_id: int | None = None,
+    tp_rank: int = 0,
+    tp_size: int = 1,
+    nccl_port: int | None = None,
     max_seq_len: int = 8192,
     dllm_algorithm: str = "LowConfidence",
     dllm_algorithm_config: str | None = None,
@@ -94,6 +97,7 @@ def create_sglang_dllm_thinker_executor_from_config(
 ):
     """Create an DllmScheduler for the LLaDA2-Uni thinker."""
     from sglang_omni.models.llada2_uni.bootstrap import create_dllm_thinker_scheduler
+    from sglang_omni.platforms import current_platform
     from sglang_omni.scheduling.sglang_backend import (
         build_sglang_server_args,
         pin_resolved_device_type,
@@ -103,13 +107,30 @@ def create_sglang_dllm_thinker_executor_from_config(
     concrete_device = resolve_concrete_device(device, gpu_id)
     resolved_gpu_id = concrete_device.index or 0
 
+    stated = dict(server_args_overrides or {})
+    platform_backend = current_platform.get_dllm_attention_backend()
     overrides: dict[str, Any] = {
-        "attention_backend": "flashinfer",
-        "disable_cuda_graph": True,
+        "attention_backend": platform_backend or "flashinfer",
         "sampling_backend": "pytorch",
+        "tp_size": tp_size,
     }
-    overrides.update(server_args_overrides or {})
+    if not current_platform.enable_dllm_decode_graph():
+        overrides["disable_cuda_graph"] = True
+    overrides.update(stated)
     pin_resolved_device_type(overrides, concrete_device.type)
+
+    if platform_backend and not overrides.get("disable_cuda_graph", False):
+        # SGLang's dLLM resolution renames the backend to flashinfer for any dLLM
+        # that captures decode graphs, and branches only for ROCm and NPU, so a
+        # platform outside that set would lose the backend its blocks need on the
+        # way in. Refuse at configuration time rather than at the first forward.
+        raise ValueError(
+            f"{current_platform.device_type} requires attention_backend="
+            f"{platform_backend!r} for a diffusion LLM, but SGLang's dLLM "
+            "resolution replaces it with flashinfer whenever decode graphs are "
+            "captured; keep enable_dllm_decode_graph() False until that pass "
+            "knows this platform"
+        )
 
     server_args = build_sglang_server_args(
         model_path,
@@ -121,13 +142,27 @@ def create_sglang_dllm_thinker_executor_from_config(
     from sglang.srt.arg_groups.model_override_base import resolved_view
 
     cfg = resolved_view(server_args)
+    # The graph state is the request this factory made, not cfg.cuda_graph_config:
+    # SGLang folds the graph switches into that field in its resolution pass, which
+    # runs inside the engine bootstrap below, and a view read before that answers
+    # with the raw input -- still None.
     logger.info(
         "create_sglang_dllm_thinker_executor_from_config: "
-        "dllm_algorithm=%s, mem_fraction_static=%s",
+        "dllm_algorithm=%s, tp_rank=%s/%s, attention_backend=%s, "
+        "decode_cuda_graph=%s, mem_fraction_static=%s",
         cfg.dllm_algorithm,
+        tp_rank,
+        tp_size,
+        cfg.attention_backend,
+        not overrides.get("disable_cuda_graph", False),
         cfg.mem_fraction_static,
     )
-    return create_dllm_thinker_scheduler(server_args, resolved_gpu_id)
+    return create_dllm_thinker_scheduler(
+        server_args,
+        resolved_gpu_id,
+        tp_rank=tp_rank,
+        nccl_port=nccl_port,
+    )
 
 
 def create_decode_executor(model_path: str):
