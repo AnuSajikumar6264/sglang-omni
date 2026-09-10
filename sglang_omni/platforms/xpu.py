@@ -78,6 +78,26 @@ class XPUOmniPlatform(OmniPlatform):
         # backend here also keeps it from reaching for CUDA-only flashinfer.
         return "triton"
 
+    def dllm_max_requests_per_round(self) -> int | None:
+        # A batched dLLM round returns fluent nonsense for some of its requests
+        # here. Measured on LLaDA2.0-Uni under TP=2, eight concurrent requests
+        # per trial: 3 of 6 trials had at least one garbled reply (one trial 4 of
+        # 8), and the dirty trials were also the slow ones (119s, 154s against
+        # 70s clean). Capping the round cleared 4 of 4 trials at 72-81s, so the
+        # cap costs no measurable throughput at this concurrency.
+        #
+        # What is left after eliminating the obvious causes -- the paged radix
+        # path (disable_radix_cache, page_size 1, still garbled), sampling RNG
+        # (the requests are temperature 0), and the algorithm's own softmax /
+        # argmax / gather (bit-identical to CPU on XPU at every batch size 1-8)
+        # -- is the multi-request forward itself: either triton's bidirectional
+        # extend mixing sequences, or the round sequence diverging across ranks,
+        # since with several requests in flight how many rounds a block takes
+        # depends on who it shares the batch with. One request per round removes
+        # both: the k-th forward is then the same request's same denoising round
+        # on every rank, whenever the work arrived.
+        return 1
+
     def _get_device_graph_backend(self) -> DeviceGraphBackend:
         from sglang_omni.platforms.device_graph import XpuDeviceGraphBackend
 

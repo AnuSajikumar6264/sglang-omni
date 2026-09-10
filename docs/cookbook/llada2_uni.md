@@ -42,7 +42,7 @@ ZE_AFFINITY_MASK=0,1 sgl-omni serve \
   --thinker.gpu_memory_fraction 0.80 --image_encoder.gpu_memory_fraction 0.12
 ```
 
-Two things are decided by the platform rather than by this command line:
+Three things are decided by the platform rather than by this command line:
 
 - **The attention backend is triton.** A dLLM denoises a whole block at once, so
   its attention must stay bidirectional. triton honours the model's
@@ -56,10 +56,18 @@ Two things are decided by the platform rather than by this command line:
   Only flashinfer and flashattention handle it, both CUDA-only — which is why
   SGLang's own dLLM pass switches to flashinfer once capture is on. Turning
   capture on here fails at startup rather than running slowly.
+- **One request denoises at a time.** A batched dLLM round returns fluent
+  nonsense for some of its requests here: eight concurrent requests garbled at
+  least one reply in 3 of 6 trials, and the dirty trials were also the slow ones.
+  Concurrent requests are still accepted and still pipelined against the image
+  encoder — they queue for the thinker instead of sharing its forward, which
+  cleared 10 of 10 trials at no measurable cost in wall-clock at this
+  concurrency.
 
 Measured on two Intel Arc Pro B60 cards: ~15-20 tok/s on a warm 64-token text
-reply. The first request after startup is several times slower (~3 tok/s) while
-triton autotunes, so time a second one before drawing conclusions.
+reply, and 8 concurrent 64-token replies in 63-93s. The first request after
+startup is several times slower (~3 tok/s) while triton autotunes, so time a
+second one before drawing conclusions.
 
 ## Text Input
 
