@@ -63,8 +63,9 @@ class XPUOmniPlatform(OmniPlatform):
         # flashattention are the only two that handle it -- which is why SGLang's
         # own dLLM pass renames the backend to flashinfer as soon as decode
         # capture is on -- and both are CUDA-only. Of the two XPU candidates,
-        # triton raises "Invalid forward mode: DLLM_EXTEND for CUDA Graph" from
-        # _apply_cuda_graph_metadata, and intel_xpu asserts is_decode_or_idle().
+        # triton raises "Invalid forward mode: DLLM_EXTEND for CUDA Graph" while
+        # building its graph metadata, and intel_xpu asserts is_decode_or_idle()
+        # with "XPU graph only supports decode mode".
         # Capture is not the blocker the AR thinker hits (the dLLM scheduler owns
         # the thread its forwards run on), so this can be flipped once an XPU
         # backend grows the mode.
@@ -83,7 +84,7 @@ class XPUOmniPlatform(OmniPlatform):
         # here. Measured on LLaDA2.0-Uni under TP=2, eight concurrent requests
         # per trial: 3 of 6 trials had at least one garbled reply (one trial 4 of
         # 8), and the dirty trials were also the slow ones (119s, 154s against
-        # 70s clean). Capping the round cleared 4 of 4 trials at 72-81s, so the
+        # 70s clean). Capping the round cleared 13 of 13 trials at 63-93s, so the
         # cap costs no measurable throughput at this concurrency.
         #
         # What is left after eliminating the obvious causes -- the paged radix
