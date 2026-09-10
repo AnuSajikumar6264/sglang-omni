@@ -51,8 +51,8 @@ Three things are decided by the platform rather than by this command line:
   returning wrong tokens with no error.
 - **Decode graphs stay off.** Every forward in this pipeline is a
   `ForwardMode.DLLM_EXTEND`, and no attention backend reachable on XPU can put
-  that mode in a graph: capture fails in the triton backend's
-  `_apply_cuda_graph_metadata`, and `intel_xpu` asserts `is_decode_or_idle()`.
+  that mode in a graph: the triton backend raises while building its graph
+  metadata, and `intel_xpu` asserts `is_decode_or_idle()`.
   Only flashinfer and flashattention handle it, both CUDA-only — which is why
   SGLang's own dLLM pass switches to flashinfer once capture is on. Turning
   capture on here fails at startup rather than running slowly.
@@ -61,7 +61,7 @@ Three things are decided by the platform rather than by this command line:
   least one reply in 3 of 6 trials, and the dirty trials were also the slow ones.
   Concurrent requests are still accepted and still pipelined against the image
   encoder — they queue for the thinker instead of sharing its forward, which
-  cleared 10 of 10 trials at no measurable cost in wall-clock at this
+  cleared 13 of 13 trials at no measurable cost in wall-clock at this
   concurrency.
 
 Measured on two Intel Arc Pro B60 cards: ~15-20 tok/s on a warm 64-token text
