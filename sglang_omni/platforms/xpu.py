@@ -57,6 +57,27 @@ class XPUOmniPlatform(OmniPlatform):
         # Capture leaves the scheduler thread's stream recording; host reads fail.
         return False
 
+    def enable_dllm_decode_graph(self) -> bool:
+        # A dLLM block arrives as ForwardMode.DLLM_EXTEND, and no attention
+        # backend reachable on XPU can put that mode in a graph. flashinfer and
+        # flashattention are the only two that handle it -- which is why SGLang's
+        # own dLLM pass renames the backend to flashinfer as soon as decode
+        # capture is on -- and both are CUDA-only. Of the two XPU candidates,
+        # triton raises "Invalid forward mode: DLLM_EXTEND for CUDA Graph" from
+        # _apply_cuda_graph_metadata, and intel_xpu asserts is_decode_or_idle().
+        # Capture is not the blocker the AR thinker hits (the dLLM scheduler owns
+        # the thread its forwards run on), so this can be flipped once an XPU
+        # backend grows the mode.
+        return False
+
+    def get_dllm_attention_backend(self) -> str:
+        # triton honors AttentionType.ENCODER_ONLY, keeping a dLLM block
+        # bidirectional. intel_xpu derives causal from is_cross_attention alone,
+        # so it would mask each block's later positions and quietly return the
+        # wrong tokens. SGLang's own dLLM pass has no XPU branch, so naming the
+        # backend here also keeps it from reaching for CUDA-only flashinfer.
+        return "triton"
+
     def _get_device_graph_backend(self) -> DeviceGraphBackend:
         from sglang_omni.platforms.device_graph import XpuDeviceGraphBackend
 
