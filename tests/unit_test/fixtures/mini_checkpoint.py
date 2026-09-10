@@ -26,6 +26,19 @@ MINI_LLAMA_CONFIG = {
 }
 
 
-def write_mini_llama_checkpoint(directory: Path) -> str:
-    (directory / "config.json").write_text(json.dumps(MINI_LLAMA_CONFIG))
+def write_mini_llama_checkpoint(
+    directory: Path,
+    *,
+    architectures: list[str] | None = None,
+) -> str:
+    """Write the config; name an architecture to reach its resolution passes.
+
+    The dLLM passes read hf_config.architectures[0] against their own table and
+    raise on anything else, so a dLLM test has to say which one it is even
+    though the rest of the record stays this llama.
+    """
+    config = dict(MINI_LLAMA_CONFIG)
+    if architectures is not None:
+        config["architectures"] = list(architectures)
+    (directory / "config.json").write_text(json.dumps(config))
     return str(directory)
