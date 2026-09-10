@@ -435,16 +435,23 @@ def test_the_thinker_refuses_a_tp_size_the_pipeline_did_not_place(
     assert named["tp_size"] == 2
 
 
-def test_the_dllm_scheduler_declares_that_tp_needs_work_replication() -> None:
-    """It holds no TP group to broadcast over, unlike OmniScheduler, so without
-    replication a follower rank would idle while its peers entered the MoE
-    collectives. The stage reads the flag with a False default, so staying
-    silent here means silently running rank 0 only."""
+def test_the_dllm_scheduler_takes_its_round_cap_from_the_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap is read once, at construction, from whatever platform the stage
+    landed on -- so a round is composed the same way for every dLLM model rather
+    than each stage having to remember to ask.
+    """
+    from sglang_omni.scheduling import dllm_scheduler as dllm_scheduler_module
     from sglang_omni.scheduling.dllm_scheduler import DllmScheduler
 
-    scheduler = DllmScheduler.__new__(DllmScheduler)
-    DllmScheduler.__init__(
-        scheduler,
+    monkeypatch.setattr(
+        dllm_scheduler_module,
+        "current_platform",
+        SimpleNamespace(dllm_max_requests_per_round=lambda: 1),
+    )
+
+    scheduler = DllmScheduler(
         tp_worker=SimpleNamespace(),
         tree_cache=SimpleNamespace(),
         req_to_token_pool=SimpleNamespace(),
@@ -456,18 +463,26 @@ def test_the_dllm_scheduler_declares_that_tp_needs_work_replication() -> None:
         result_adapter=lambda data: data,
     )
 
+    assert scheduler._max_requests_per_round == 1
+    # The follower ranks are fed by the stage, not by a group of this
+    # scheduler's own: it holds none to broadcast over.
     assert scheduler.requires_tp_work_fanout is True
 
 
 def test_every_platform_answers_the_hooks_this_model_reads() -> None:
-    """The stage consults two hooks on whatever platform it lands on. A platform
-    that answered neither would fall back to the base class, which leaves the
-    backend to SGLang's own dLLM pass; XPU is the one that names it, because that
-    pass has no XPU branch and would hand the run CUDA-only flashinfer.
+    """The stage consults three hooks on whatever platform it lands on. A platform
+    that answered none would fall back to the base class, which leaves the backend
+    to SGLang's own dLLM pass; XPU is the one that names it, because that pass has
+    no XPU branch and would hand the run CUDA-only flashinfer.
 
     Decode capture stays off everywhere: no attention backend reachable on XPU
     accepts ForwardMode.DLLM_EXTEND in a graph, and on CUDA this stage has not
     been measured with capture on.
+
+    The round cap is XPU's too, and for a measured reason rather than a
+    conservative one -- see XPUOmniPlatform.dllm_max_requests_per_round. Leaving
+    it None everywhere else keeps SGLang's batched denoising for the platforms
+    where it has not been observed to break.
     """
     from sglang_omni.platforms.cuda import CUDAOmniPlatform
     from sglang_omni.platforms.interface import OmniPlatform
@@ -475,12 +490,14 @@ def test_every_platform_answers_the_hooks_this_model_reads() -> None:
     from sglang_omni.platforms.xpu import XPUOmniPlatform
 
     expected = {
-        OmniPlatform: (None, False),
-        CUDAOmniPlatform: (None, False),
-        ROCMOmniPlatform: (None, False),
-        XPUOmniPlatform: ("triton", False),
+        OmniPlatform: (None, False, None),
+        CUDAOmniPlatform: (None, False, None),
+        ROCMOmniPlatform: (None, False, None),
+        XPUOmniPlatform: ("triton", False, 1),
     }
-    for platform_class, (backend, graph) in expected.items():
+    for platform_class, (backend, graph, cap) in expected.items():
         platform = platform_class()
-        assert platform.get_dllm_attention_backend() == backend, platform_class.__name__
-        assert platform.enable_dllm_decode_graph() is graph, platform_class.__name__
+        name = platform_class.__name__
+        assert platform.get_dllm_attention_backend() == backend, name
+        assert platform.enable_dllm_decode_graph() is graph, name
+        assert platform.dllm_max_requests_per_round() == cap, name

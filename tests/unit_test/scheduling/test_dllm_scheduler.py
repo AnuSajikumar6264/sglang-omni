@@ -45,7 +45,121 @@ def _scheduler(*, fdfo: bool, block_size: int = 4) -> DllmScheduler:
     scheduler._rid_to_req_data = {}
     scheduler._result_adapter = lambda value: value
     scheduler.outbox = SimpleNamespace(put=lambda value: None)
+    scheduler._max_requests_per_round = None
     return scheduler
+
+
+def _admission_req(rid: str) -> SimpleNamespace:
+    """A request that records nothing but its own admission calls."""
+    return SimpleNamespace(
+        rid=rid,
+        inflight_middle_chunks=0,
+        init_next_round_input=lambda *args: None,
+    )
+
+
+def _capped_round(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cap: int | None,
+    staging: list,
+    waiting: list,
+) -> tuple[DllmScheduler, list]:
+    """Schedule one round under ``cap``; return the scheduler and the batch."""
+    from sglang.srt.runtime_context import get_context
+
+    scheduler = _scheduler(fdfo=True)
+    scheduler.tree_cache = object()
+    scheduler.token_to_kv_pool_allocator = object()
+    scheduler.req_to_token_pool = object()
+    scheduler.model_config = object()
+    scheduler._chunked_prefill_size = 16
+    scheduler._max_requests_per_round = cap
+    scheduler._staging_queue = list(staging)
+    scheduler._waiting_queue = list(waiting)
+    admitted: list = []
+
+    class _Adder:
+        def __init__(self, *args, **kwargs) -> None:
+            self.can_run_list = admitted
+
+        def add_dllm_staging_req(self, req):
+            self.can_run_list.append(req)
+            return dllm_scheduler_module.AddReqResult.CONTINUE
+
+        def add_one_req(self, req, **kwargs):
+            self.can_run_list.append(req)
+            return dllm_scheduler_module.AddReqResult.CONTINUE
+
+    monkeypatch.setattr(dllm_scheduler_module, "PrefillAdder", _Adder)
+    monkeypatch.setattr(
+        dllm_scheduler_module,
+        "ScheduleBatch",
+        SimpleNamespace(
+            init_new=lambda **kwargs: SimpleNamespace(
+                prepare_for_extend=lambda: None, reqs=kwargs["reqs"]
+            )
+        ),
+    )
+
+    with get_context().override_server_args(page_size=1, max_prefill_tokens=16):
+        scheduler._schedule_next_batch()
+
+    return scheduler, admitted
+
+
+def test_a_capped_round_admits_nothing_beside_the_request_already_denoising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One SGLang forward denoises every block in the round together, so how many
+    rounds a block takes depends on which requests share it. Where a platform has
+    measured that batching return wrong tokens, a round already holding a request
+    must take no more, and the waiting one has to stay queued rather than be
+    dropped.
+    """
+    staged = _admission_req("staged")
+    waiting = _admission_req("waiting")
+
+    scheduler, admitted = _capped_round(
+        monkeypatch, cap=1, staging=[staged], waiting=[waiting]
+    )
+
+    assert admitted == [staged]
+    assert scheduler._waiting_queue == [waiting]
+    assert scheduler._staging_queue == [staged]
+
+
+def test_an_uncapped_round_still_batches_every_request_that_fits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap is opt-in: a platform that names none keeps batched denoising."""
+    staged = _admission_req("staged")
+    first = _admission_req("first")
+    second = _admission_req("second")
+
+    scheduler, admitted = _capped_round(
+        monkeypatch, cap=None, staging=[staged], waiting=[first, second]
+    )
+
+    assert admitted == [staged, first, second]
+    assert scheduler._waiting_queue == []
+
+
+def test_a_cap_counts_the_whole_round_not_the_new_arrivals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A staging request occupies a slot in the round it is re-submitted into, so
+    a cap of two admits one newcomer beside it -- not two."""
+    staged = _admission_req("staged")
+    first = _admission_req("first")
+    second = _admission_req("second")
+
+    scheduler, admitted = _capped_round(
+        monkeypatch, cap=2, staging=[staged], waiting=[first, second]
+    )
+
+    assert admitted == [staged, first]
+    assert scheduler._waiting_queue == [second]
 
 
 def test_model_worker_fdfo_forwards_carried_states_and_all_result_fields() -> None:
