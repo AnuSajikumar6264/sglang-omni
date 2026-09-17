@@ -88,6 +88,49 @@ sgl-omni serve \
   --port 8000
 ```
 
+## Intel XPU
+
+Install `sglang-omni` from source as in [XPU Installation](../get_started/installation_xpu.md). The extra lives in `pyproject_xpu.toml`, so ask the XPU installer for it rather than running `pip install -e ".[fun-cosyvoice3]"`, which would resolve the CUDA project file and replace the `+xpu` torch stack:
+
+```bash
+scripts/xpu/install_xpu.sh --extras fun-cosyvoice3
+```
+
+The CosyVoice and Matcha-TTS checkouts and the two `PYTHONPATH` entries are the same as above. `sox` is not needed: it belongs to a different model's preprocessing.
+
+Pin the server to one card, and cap the engine's static memory so the KV pool leaves room for the Flow graphs and the decode activations:
+
+```bash
+export ZE_AFFINITY_MASK=0
+sgl-omni serve \
+  --model-path FunAudioLLM/Fun-CosyVoice3-0.5B-2512 \
+  --tts_engine.engine.mem_fraction_static 0.4 \
+  --tts_engine.engine.disable_cuda_graph true \
+  --port 8000
+```
+
+`--tts_engine.engine.mem_fraction_static` matters on a 24 GiB card. The default sizing gives the KV pool 1.5 M tokens (17.8 GB) and leaves 3.3 GB, which the first request exhausts:
+
+```
+RuntimeError: level_zero backend failed with error: 40 (UR_RESULT_ERROR_OUT_OF_RESOURCES)
+```
+
+`0.4` leaves 690 k KV tokens and 13 GB of headroom, which is far more than this model's context needs.
+
+The Flow decoder's own graphs are on by default and record on XPU. Startup logs the shapes it captured, and the whole set takes about three minutes:
+
+```
+Captured 55 Fun-CosyVoice3 Flow graphs on xpu:0 (batch x mel_frame: 15x624, 16x576, ...)
+```
+
+They pay off once the vocoder batches, because the default capture shapes cover batches up to 16 at 416-640 mel frames. In one paired run on a single Intel Arc Pro B60, 16 concurrent requests produced 8.58x realtime with the graphs against 6.28x without them, and p50 latency dropped from 23.1 s to 14.8 s. A single request is not batched enough to reach a captured shape, so it runs eager either way. Pass `--vocoder.factory.enable_flow_cuda_graph false` to skip capture, which trades that throughput for a faster startup.
+
+`--tts_engine.engine.disable_cuda_graph true` is required for now: the AR engine's own decode-graph capture fails on XPU inside SGLang's graph runner, before this model's code is reached.
+
+```
+Exception: Capture cuda graph failed: Inplace update to inference tensor outside
+InferenceMode is not allowed.
+```
 
 ## Synthesizing Speech
 
