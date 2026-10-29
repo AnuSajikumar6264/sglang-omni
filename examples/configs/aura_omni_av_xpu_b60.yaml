@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# AURA Omni audio-video on two Intel Arc Pro B60 cards (24 GB each).
+#
+#   python examples/aura_omni_av/serve.py --config examples/configs/aura_omni_av_xpu_b60.yaml
+#
+# Qwen3-ASR and Qwen3-TTS share card 0. AURA's 16.5 GiB of BF16 weights fill most of
+# card 1, and SGLang's automatic budget on XPU then leaves the KV pool no room, so its
+# fraction is pinned.
+
+config_cls: AuraOmniAVPipelineConfig
+name: aura-omni-av-xpu-b60
+model_path: aurateam/AURA
+
+stages:
+  asr:
+    factory:
+      # With its encoder graph on, Qwen3-ASR's encoder thread never returns from copying the audio embedding to the host on XPU.
+      enable_encoder_cuda_graph: false
+  aura:
+    gpu: 1
+    engine:
+      mem_fraction_static: 0.85
